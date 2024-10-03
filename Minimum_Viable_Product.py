@@ -14,15 +14,14 @@ from openai import OpenAI
 
 
 def main():
-    client = api_key()
-    retrieve_fees_charged(client)
-    retrieve_balance(client)
-
+    client = client_with_api_key()
+    taker_fee_rate, maker_fee_rate = retrieve_fees_charged(client)
+    cash_balance,btc_balance = retrieve_balance(client)
     df = coinbase_df()
-    ai_trading(df)
+    ai_trading(df,client,btc_balance,cash_balance,taker_fee_rate,maker_fee_rate)
 
 
-def api_key():
+def client_with_api_key():
     load_dotenv()
     api_key = os.getenv("api_key")
     api_secret = os.getenv("api_secret")
@@ -52,7 +51,7 @@ def coinbase_df():
 
 
 
-def ai_trading(df):
+def ai_trading(df,client,btc_balance,cash_balance,taker_fee_rate,maker_fee_rate):
     result = openAI_request(df)
     if result['decision'] == 'sell':
         client_order_id = str(uuid.uuid4().hex)
@@ -65,6 +64,7 @@ def ai_trading(df):
         print("Sell : ", result['reason'])
 
     elif result['decision'] == 'buy':
+        client_order_id = str(uuid.uuid4().hex)
         product_id = "BTC-USD"
         quote_size = trunc(cash_balance * (1 - maker_fee_rate) * 100) / 100  # Cash
         quote_size = str(quote_size)
@@ -130,6 +130,7 @@ def retrieve_fees_charged(client):
 
     print("Taker Fee Rate : ", taker_fee_rate)
     print("Maker Fee Rate : ", maker_fee_rate)
+    return taker_fee_rate, maker_fee_rate
 
 
 def retrieve_balance(client):
@@ -142,18 +143,10 @@ def retrieve_balance(client):
 
     print("Cash Balance : ", cash_balance)
     print("BTC Balance : ", btc_balance)
+    return cash_balance,btc_balance
 
 
 if __name__ == '__main__':
     main()
-
-
-
-
-
-
-
-
-
 
 
