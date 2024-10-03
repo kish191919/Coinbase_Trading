@@ -8,7 +8,6 @@ from json import dumps
 from math import trunc
 from dotenv import load_dotenv
 from coinbase.rest import RESTClient
-from datetime import datetime
 from datetime import datetime, timedelta
 from openai import OpenAI
 
@@ -120,8 +119,6 @@ def openAI_request(df):
 
 
 def retrieve_fees_charged(client):
-    product_type = "SPOT"
-    contract_expiry_type = "UNKNOW_CONTRACT"
     summary = client.get_transaction_summary()
     taker_fee_rate = summary['fee_tier']['taker_fee_rate']
     maker_fee_rate = summary['fee_tier']['maker_fee_rate']
