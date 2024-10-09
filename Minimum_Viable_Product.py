@@ -3,6 +3,8 @@ import json
 import uuid
 import ccxt
 import pandas as pd
+import time
+import http.client
 
 from json import dumps
 from math import trunc
@@ -11,47 +13,280 @@ from coinbase.rest import RESTClient
 from datetime import datetime, timedelta
 from openai import OpenAI
 
+import jwt
+from cryptography.hazmat.primitives import serialization
+import time
+import secrets
+
+
 
 def main():
-    client = client_with_api_key()
+    client, api_key, api_secret = get_api_key()
+
+    get_list_of_account(api_key, api_secret)
+    get_product_book(api_key, api_secret)
+
+
+    bids_df, asks_df = get_order_book(product_id="BTC-USD", level=2)
     taker_fee_rate, maker_fee_rate = retrieve_fees_charged(client)
     cash_balance,btc_balance = retrieve_balance(client)
-    df = coinbase_df()
+
+    df = get_product_candles(api_key, api_secret)
     ai_trading(df,client,btc_balance,cash_balance,taker_fee_rate,maker_fee_rate)
 
-
-def client_with_api_key():
+def get_api_key():
     load_dotenv()
     api_key = os.getenv("api_key")
     api_secret = os.getenv("api_secret")
+
     # Create Instance
     client = RESTClient(api_key=api_key, api_secret=api_secret)
-    return client
-
-def coinbase_df():
-    # Initialize the Coinbase exchange
-    exchange = ccxt.coinbase()  # Use coinbasepro for the public API
-
-    # Define the symbol and time frame
-    symbol = 'BTC/USD'
-    timeframe = '1d'  # Daily data
-
-    # Fetch historical data (e.g., the last 30 days)
-    since = exchange.parse8601((datetime.now() - pd.Timedelta(days=30)).isoformat())
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since)
-
-    # Create a DataFrame
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-
-    # Convert timestamp to a readable date format
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-
-    return df
+    return client, api_key, api_secret
 
 
+def build_jwt(resource, api_key, api_secret):
+    private_key_bytes = api_secret.encode('utf-8')
+    private_key = serialization.load_pem_private_key(private_key_bytes, password=None)
+    uri = f"GET api.coinbase.com/api/v3/brokerage/{resource}"
+    jwt_payload = {
+        'sub': api_key,
+        'iss': "cdp",
+        'nbf': int(time.time()),
+        'exp': int(time.time()) + 120,
+        'uri': uri,
+    }
+    jwt_token = jwt.encode(
+        jwt_payload,
+        private_key,
+        algorithm='ES256',
+        headers={'kid': api_key, 'nonce': secrets.token_hex()},
+    )
+    return jwt_token
+
+
+def get_list_of_account(api_key, api_secret, limit=49, cursor=None):
+    resource = "accounts"
+    jwt_token = build_jwt(resource, api_key, api_secret)
+
+    # Establish a connection to view order book data from Coinbase Pro API
+    conn = http.client.HTTPSConnection("api.coinbase.com")
+    payload = ''
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer '+ str(jwt_token)
+    }
+
+    # Send account inquiry request
+    url = f"/api/v3/brokerage/accounts"
+    conn.request("GET", url, payload, headers)
+
+    # Get response
+    res = conn.getresponse()
+
+    # Check response status code
+    check_response_status_code(res)
+
+    # Read response body
+    data = res.read()
+
+    try:
+        # Parse into JSON data
+        list_of_account = json.loads(data.decode("utf-8"))
+        print(json.dumps(list_of_account, indent=2))
+    except json.JSONDecodeError as e:
+        print(f"JSON Decode Error: {str(e)}")
+        print(f"Raw response: {data.decode('utf-8')}")
+
+    # Terminate connection
+    conn.close()
+
+
+def get_order_book(product_id="BTC-USD", level=2):
+    # Establish a connection to view order book data from Coinbase Pro API
+    conn = http.client.HTTPSConnection("api.exchange.coinbase.com")
+    payload = ''
+    headers = {
+        'Content-Type': 'application/json'
+    }
+
+    # Send order book inquiry request (level 2: Aggregated Order Book)
+    url = f"/products/{product_id}/book?level={level}"
+    conn.request("GET", url, payload, headers)
+
+    # Get response
+    res = conn.getresponse()
+
+    # Check response status code
+    check_response_status_code(res)
+
+    # Read response body
+    data = res.read()
+
+    try:
+        # Parse into JSON data
+        order_book = json.loads(data.decode("utf-8"))
+
+        # Check if 'bids' and 'asks' keys exist in the response
+        if 'bids' not in order_book or 'asks' not in order_book:
+            print("Error: 'bids' or 'asks' key not found in the response")
+            print(f"Full response: {json.dumps(order_book, indent=2)}")
+            return None, None
+
+        # bids(매수)와 asks(매도) 추출
+        bids = order_book['bids']  # [price, size, num_orders]
+        asks = order_book['asks']  # [price, size, num_orders]
+
+        # DataFrame으로 변환하여 출력
+        bids_df = pd.DataFrame(bids, columns=['price', 'size', 'num_orders'])
+        asks_df = pd.DataFrame(asks, columns=['price', 'size', 'num_orders'])
+
+        print("Order Book - Bids (Buy Orders):")
+        print(bids_df)
+
+        print("\nOrder Book - Asks (Sell Orders):")
+        print(asks_df)
+
+        return bids_df, asks_df
+
+    except json.JSONDecodeError as e:
+        print(f"JSON Decode Error: {str(e)}")
+        print(f"Raw response: {data.decode('utf-8')}")
+        return None, None
+
+
+def get_product_book(api_key, api_secret):
+    resource = "product_book"
+    jwt_token = build_jwt(resource, api_key, api_secret)
+
+    # Establish a connection to view products
+    conn = http.client.HTTPSConnection("api.coinbase.com")
+    payload = ''
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + str(jwt_token)
+    }
+
+
+    # Send order book inquiry request (level 2: Aggregated Order Book)
+    url = f"/api/v3/brokerage/product_book?product_id=BTC-USD&limit=1"
+    conn.request("GET", url, payload, headers)
+    print("conn request")
+
+    # Get response
+    res = conn.getresponse()
+
+    # Check response status code
+    check_response_status_code(res)
+
+    # Read response body
+    data = res.read()
+
+    try:
+        # Parse into JSON data
+        product_book = json.loads(data.decode("utf-8"))
+        print(json.dumps(product_book, indent=2))
+    except json.JSONDecodeError as e:
+        print(f"JSON Decode Error: {str(e)}")
+        print(f"Raw response: {data.decode('utf-8')}")
+
+    # Terminate connection
+    conn.close()
+
+
+
+def get_product_candles(api_key, api_secret):
+    product_id = 'BTC-USD'
+    granularity = "ONE_HOUR"
+    limit = 350
+    end = datetime.now()
+    start = end - timedelta(hours=24)
+
+    end_unix = int(end.timestamp())
+    start_unix = int(start.timestamp())
+
+    resource = f"products/{product_id}/candles"
+    jwt_token = build_jwt(resource, api_key, api_secret)
+
+    # Establish a connection to view product candles data from Coinbase API
+    conn = http.client.HTTPSConnection("api.coinbase.com")
+    payload = ''
+    headers = {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + str(jwt_token)
+    }
+
+    # API request with parameters
+    url = f"/api/v3/brokerage/products/{product_id}/candles?start={str(start_unix)}&end={str(end_unix)}&granularity={granularity}&limit={limit}"
+    conn.request("GET", url, payload, headers)
+
+    # Get response
+    res = conn.getresponse()
+
+    # Check response status code
+    check_response_status_code(res)
+
+    # Read response body
+    data = res.read()
+
+    try:
+        # Parse into JSON data
+        product_candles = json.loads(data.decode("utf-8"))
+
+        # Convert candles list to data frame
+        product_candles_df = pd.DataFrame(product_candles["candles"])
+
+        # Data type conversion (conversion to numeric type)
+        product_candles_df["start"] = pd.to_numeric(product_candles_df["start"], errors='coerce')
+        product_candles_df["start"] = pd.to_datetime(product_candles_df["start"], unit='s')  # timestamp 변환
+        product_candles_df[["low", "high", "open", "close", "volume"]] = product_candles_df[
+            ["low", "high", "open", "close", "volume"]].astype(float)
+
+        # Dataframe output
+        print(product_candles_df)
+        return product_candles_df
+
+    except json.JSONDecodeError as e:
+        print(f"JSON Decode Error: {str(e)}")
+        print(f"Raw response: {data.decode('utf-8')}")
+
+    # Terminate connection
+    conn.close()
+
+
+
+def retrieve_fees_charged(client):
+    summary = client.get_transaction_summary()
+    taker_fee_rate = summary['fee_tier']['taker_fee_rate']
+    maker_fee_rate = summary['fee_tier']['maker_fee_rate']
+    taker_fee_rate = float(taker_fee_rate)
+    maker_fee_rate = float(maker_fee_rate)
+
+    print("Taker Fee Rate : ", taker_fee_rate)
+    print("Maker Fee Rate : ", maker_fee_rate)
+    return taker_fee_rate, maker_fee_rate
+
+
+def retrieve_balance(client):
+    # Check Cash
+    accounts = client.get_accounts()
+    cash_balance = float(accounts['accounts'][0]['available_balance']['value'])
+
+    # Check BTC
+    btc_balance = float(accounts['accounts'][1]['available_balance']['value'])
+
+    print("Cash Balance : ", cash_balance)
+    print("BTC Balance : ", btc_balance)
+    return cash_balance,btc_balance
+
+def check_response_status_code(res):
+    if res.status != 200:
+        print(f"Error: Received status code {res.status}")
+        return
 
 def ai_trading(df,client,btc_balance,cash_balance,taker_fee_rate,maker_fee_rate):
     result = openAI_request(df)
+    result['decision'] = 'hold'
+
     if result['decision'] == 'sell':
         client_order_id = str(uuid.uuid4().hex)
         product_id = "BTC-USD"
@@ -118,32 +353,12 @@ def openAI_request(df):
     return result
 
 
-def retrieve_fees_charged(client):
-    summary = client.get_transaction_summary()
-    taker_fee_rate = summary['fee_tier']['taker_fee_rate']
-    maker_fee_rate = summary['fee_tier']['maker_fee_rate']
-    taker_fee_rate = float(taker_fee_rate)
-    maker_fee_rate = float(maker_fee_rate)
-
-    print("Taker Fee Rate : ", taker_fee_rate)
-    print("Maker Fee Rate : ", maker_fee_rate)
-    return taker_fee_rate, maker_fee_rate
-
-
-def retrieve_balance(client):
-    # Check Cash
-    accounts = client.get_accounts()
-    cash_balance = float(accounts['accounts'][0]['available_balance']['value'])
-
-    # Check BTC
-    btc_balance = float(accounts['accounts'][1]['available_balance']['value'])
-
-    print("Cash Balance : ", cash_balance)
-    print("BTC Balance : ", btc_balance)
-    return cash_balance,btc_balance
-
-
 if __name__ == '__main__':
     main()
+
+
+
+
+
 
 
