@@ -35,6 +35,7 @@
   "keyToString": {
     "Python.AI_Trading.executor": "Run",
     "Python.Minimum_Viable_Product.executor": "Run",
+    "Python.coinbase_AI_trading.executor": "Run",
     "Python.main.executor": "Run",
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "git-widget-placeholder": "master",
