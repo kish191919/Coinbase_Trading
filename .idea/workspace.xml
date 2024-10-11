@@ -5,7 +5,11 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="ad23cfdd-1441-4172-85f5-8b80271e8169" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/Minimum_Viable_Product.py" beforeDir="false" afterPath="$PROJECT_DIR$/Minimum_Viable_Product.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Minimum_Viable_Product.ipynb" beforeDir="false" afterPath="$PROJECT_DIR$/coinbase_AI_trading.ipynb" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Minimum_Viable_Product.py" beforeDir="false" afterPath="$PROJECT_DIR$/coinbase_AI_trading.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -33,14 +37,16 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent">{
-  &quot;keyToString&quot;: {
-    &quot;Python.Minimum_Viable_Product.executor&quot;: &quot;Run&quot;,
-    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
-    &quot;git-widget-placeholder&quot;: &quot;master&quot;,
-    &quot;last_opened_file_path&quot;: &quot;/Users/sunghwanki/Desktop/Coinbase_Trading&quot;
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "Python.AI_Trading.executor": "Run",
+    "Python.Minimum_Viable_Product.executor": "Run",
+    "Python.main.executor": "Run",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "git-widget-placeholder": "master",
+    "last_opened_file_path": "/Users/sunghwanki/Desktop/Coinbase_Trading"
   }
-}</component>
+}]]></component>
   <component name="SharedIndexes">
     <attachedChunks>
       <set>

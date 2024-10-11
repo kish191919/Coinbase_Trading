@@ -1,9 +1,7 @@
 import os
 import json
 import uuid
-import ccxt
 import pandas as pd
-import time
 import http.client
 
 from json import dumps
@@ -17,7 +15,6 @@ import jwt
 from cryptography.hazmat.primitives import serialization
 import time
 import secrets
-
 
 
 def main():
