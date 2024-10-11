@@ -193,10 +193,10 @@ def get_product_book(api_key, api_secret):
 
 def get_product_candles(api_key, api_secret):
     product_id = 'BTC-USD'
-    granularity = "ONE_HOUR"
+    granularity = "ONE_DAY"
     limit = 350
     end = datetime.now()
-    start = end - timedelta(hours=24)
+    start = end - timedelta(days=30)
 
     end_unix = int(end.timestamp())
     start_unix = int(start.timestamp())

@@ -23,8 +23,8 @@ graph TD
     A[Coinbase API] --> B[API Connection Setup]
     B --> C[Data Retrieval]
     C --> D[Balance & Fee Info]
-    C --> E[Historical Data]
-    D --> F[AI Trading Decision]
+    C --> E[Historical Data(30 Days)]
+    D --> F[AI Trading Decision with OpenAI]
     E --> F
     F --> G[Order Execution]
     G --> A
