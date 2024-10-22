@@ -23,7 +23,6 @@ def main():
     get_list_of_account(api_key, api_secret)
     get_product_book(api_key, api_secret)
 
-
     bids_df, asks_df = get_order_book(product_id="BTC-USD", level=2)
     taker_fee_rate, maker_fee_rate = retrieve_fees_charged(client)
     cash_balance,btc_balance = retrieve_balance(client)
