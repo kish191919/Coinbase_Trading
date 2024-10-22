@@ -1,3 +1,8 @@
 ta
 pandas
-dotenv
+load_dotenv
+yfinance
+fear_and_greed
+OpenAI
+pydantic
+requests

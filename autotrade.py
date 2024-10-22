@@ -12,6 +12,12 @@ from dotenv import load_dotenv
 from cryptography.hazmat.primitives import serialization
 from typing import Tuple, Optional, Dict, Any
 from urllib.parse import quote
+import requests
+
+import yfinance as yf
+import fear_and_greed
+from openai import OpenAI
+from pydantic import BaseModel
 
 from ta.trend import SMAIndicator, MACD
 from ta.momentum import RSIIndicator
@@ -32,6 +38,25 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# Configuration class
+class Config:
+    ROBINHOOD_USERNAME = os.getenv("username")
+    ROBINHOOD_PASSWORD = os.getenv("password")
+    ROBINHOOD_TOTP_CODE = os.getenv("totpcode")
+    SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
+    ALPHA_VANTAGE_API_KEY = os.getenv("Alpha_Vantage_API_KEY")
+    SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
+    SLACK_APP_TOKEN = os.getenv("SLACK_APP_TOKEN")
+    SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+
+class TradingDecision(BaseModel):
+    decision: str
+    percentage: int
+    reason: str
+
+
 class Autotrade:
     """
     A class for automated cryptocurrency trading using Coinbase API.
@@ -43,6 +68,8 @@ class Autotrade:
         self.api_key, self.api_secret = self._get_api_credentials()
         self.base_url = "api.coinbase.com"
         self.exchange_url = "api.exchange.coinbase.com"
+        self.openai_client = OpenAI(api_key=Config.OPENAI_API_KEY)
+        self.logger = logging.getLogger(f"Autotrade")
 
         # Store connection and headers for reuse
         self._cached_conn: Optional[http.client.HTTPSConnection] = None
@@ -106,7 +133,7 @@ class Autotrade:
 
     # Retrieve historical candle data for a specific product.
     def get_candles(self, product_id: str, granularity: int, start: Optional[str] = None, end: Optional[str] = None) -> \
-    Optional[pd.DataFrame]:
+            Optional[pd.DataFrame]:
         try:
             # Create a new connection specifically for exchange API
             conn = http.client.HTTPSConnection(self.exchange_url, timeout=10)
@@ -243,18 +270,18 @@ class Autotrade:
         df['macd_diff'] = indicators['macd'].macd_diff()
 
         # Add SMAs efficiently
-        for window in [10, 20, 60]:
+        for window in [10, 30]:
             df[f'sma_{window}'] = SMAIndicator(close=df['close'], window=window).sma_indicator()
 
         return df
 
     # Get historical price data for different time periods.
-    def get_historical_data(self, product_id: str = "BTC-USD") -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame], Optional[pd.DataFrame]]:
+    def get_historical_data(self, product_id: str = "BTC-USD") -> Tuple[
+        Optional[pd.DataFrame], Optional[pd.DataFrame], Optional[pd.DataFrame]]:
         end_time = datetime.utcnow()
         periods = {
-            '24h': {'days': 1, 'granularity': 300},  # 5-minute intervals
-            '30d': {'days': 30, 'granularity': 86400},  # 1-day intervals
-            '90d': {'days': 90, 'granularity': 86400}  # 1-day intervals
+            '24h': {'days': 1, 'granularity': 900},  # 15-minute intervals
+            '30d': {'days': 30, 'granularity': 86400}  # 1-day intervals
         }
 
         results = []
@@ -276,14 +303,193 @@ class Autotrade:
     # Get technical analysis for different time periods.
     def get_analysis(self, product_id: str = "BTC-USD") -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
 
-        data_24h, data_30d, data_90d = self.get_historical_data(product_id)
+        data_24h, data_30d = self.get_historical_data(product_id)
 
-        return tuple(self.add_technical_indicators(df) if df is not None else None for df in [data_24h, data_30d, data_90d])
+        return tuple(self.add_technical_indicators(df) if df is not None else None for df in [data_24h, data_30d])
 
     def __del__(self):
         """Cleanup method to properly close connections."""
         if self._cached_conn:
             self._cached_conn.close()
+
+    # 2-4 Data Collection - VIX Index
+    def get_vix_index(self):
+        # Fetch VIX INDEX data
+        self.logger.info("Fetching VIX INDEX data")
+        try:
+            vix = yf.Ticker("^VIX")
+            vix_data = vix.history(period="1d")
+            current_vix = round(vix_data['Close'].iloc[-1], 2)
+            self.logger.info(f"Current VIX INDEX: {current_vix}")
+            return current_vix
+        except Exception as e:
+            self.logger.error(f"Error fetching VIX INDEX: {str(e)}")
+            return None
+
+    # 2-5 Data Collection - Fear & Greed Index
+    def get_fear_and_greed_index(self):
+        # Fetch Fear and Greed Index
+        self.logger.info("Fetching Fear and Greed Index")
+        fgi = fear_and_greed.get()
+        return {
+            "value": fgi.value,
+            "description": fgi.description,
+            "last_update": fgi.last_update.isoformat()
+        }
+
+    # Data Collection - News
+    def get_news(self):
+        # Fetch news from multiple sources
+        return {
+            "google_news": self._get_news_from_google(),
+            "alpha_vantage_news": self._get_news_from_alpha_vantage(),
+            "robinhood_news": self._get_news_from_robinhood()
+        }
+
+    def _get_news_from_google(self):
+        # Fetch news from Google
+        self.logger.info("Fetching news from Google")
+        url = "https://www.searchapi.io/api/v1/search"
+        params = {
+            "api_key": Config.SERPAPI_API_KEY,
+            "engine": "google_news",
+            "q": "BTC",
+            "num": 5
+        }
+        headers = {"Accept": "application/json"}
+        try:
+            response = requests.get(url, params=params, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+            news_items = []
+            for result in data.get('organic_results', [])[:5]:
+                news_items.append({
+                    'title': result['title'],
+                    'date': result['date']
+                })
+            self.logger.info(f"Retrieved {len(news_items)} news items from Google")
+            return news_items
+        except Exception as e:
+            self.logger.error(f"Error during Google News API request: {e}")
+            return []
+
+    def _get_news_from_robinhood(self):
+        self.logger.info("Fetching news from Robinhood")
+        try:
+            news_data = r.robinhood.stocks.get_news("BTC")
+            news_items = []
+            for item in news_data[:5]:  # Limit to 5 news items
+                news_items.append({
+                    'title': item['title'],
+                    'published_at': item['published_at']
+                })
+            self.logger.info(f"Retrieved {len(news_items)} news items from Robinhood")
+            return news_items
+        except Exception as e:
+            self.logger.error(f"Error fetching news from Robinhood: {str(e)}")
+            return []
+
+    def _get_news_from_alpha_vantage(self):
+        # Fetch news from Alpha Vantage
+        self.logger.info("Fetching news from Alpha Vantage")
+        url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers=BTC&apikey={Config.ALPHA_VANTAGE_API_KEY}"
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+            data = response.json()
+            if "feed" not in data:
+                self.logger.warning("No news data found in Alpha Vantage response")
+                return []
+            news_items = []
+            for item in data["feed"][:10]:
+                title = item.get("title", "No title")
+                time_published = item.get("time_published", "No date")
+                if time_published != "No date":
+                    dt = datetime.strptime(time_published, "%Y%m%dT%H%M%S")
+                    time_published = dt.strftime("%Y-%m-%d %H:%M:%S")
+                news_items.append({
+                    'title': title,
+                    'pubDate': time_published
+                })
+            self.logger.info(f"Retrieved {len(news_items)} news items from Alpha Vantage")
+            return news_items
+        except Exception as e:
+            self.logger.error(f"Error during Alpha Vantage API request: {e}")
+            return []
+
+    # Perform AI-based analysis
+    def ai_analysis(self):
+        # Get and analyze market data
+        analysis_24h, analysis_30d = self.get_analysis("BTC-USD")
+        news = self.get_news()
+        fgi = self.get_fear_and_greed_index()
+        vix_index = self.get_vix_index()
+
+        self.logger.info("Sending request to OpenAI")
+        response = self.openai_client.chat.completions.create(
+            model="gpt-4o-2024-08-06",
+            messages=[
+                {
+                    "role": "system",
+                    "content": f"""You are an expert in BTC investing. Analyze the provided data and determine whether to buy, sell, or hold at the current moment. Consider the following in your analysis:
+                        - Technical indicators and market data
+                        - Recent news headlines and their potential impact on BTC price
+                        - The Fear and Greed Index and its implications
+                        - VIX INDEX and its implications for market volatility
+                        - Current VIX INDEX: {vix_index}
+
+                        Based on this trading method, analyze the current market situation and make a judgment by synthesizing it with the provided data.
+
+                        Response format:
+                        1. Decision (buy, sell, or hold)
+                        2. If the decision is 'buy', provide a percentage (1-100) of available KRW to use for buying.
+                        If the decision is 'sell', provide a percentage (1-100) of held BTC to sell.
+                        If the decision is 'hold', set the percentage to 0.
+                        3. Reason for your decision
+
+                        Ensure that the percentage is an integer between 1 and 100 for buy/sell decisions, and exactly 0 for hold decisions.
+                        Your percentage should reflect the strength of your conviction in the decision based on the analyzed data."""},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps({
+                                "month_data": analysis_30d.to_json(),
+                                "daily_data": analysis_24h.to_json(),
+                                "fear_and_greed_index": fgi,
+                                "vix_index": vix_index,
+                                "news": news
+                            })
+                        }
+                    ]
+                }
+            ],
+            max_tokens=4095,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "trading_decision",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "decision": {"type": "string", "enum": ["BUY", "SELL", "HOLD"]},
+                            "percentage": {"type": "integer"},
+                            "reason": {"type": "string"}
+                        },
+                        "required": ["decision", "percentage", "reason"],
+                        "additionalProperties": False
+                    }
+                }
+            }
+        )
+        result = TradingDecision.model_validate_json(response.choices[0].message.content)
+        self.logger.info("Received response from OpenAI")
+        self.logger.info(f"### AI Decision: {result.decision.upper()} ###")
+        self.logger.info(f"### Percentage: {result.percentage} ###")
+        self.logger.info(f"### Reason: {result.reason} ###")
+        self.logger.info(f"### VIX INDEX: {vix_index} ###")
 
 
 def main():
@@ -295,9 +501,9 @@ def main():
         usd_balance, btc_balance = client.get_available_balance()
         logger.info(f"USD balance: {usd_balance:.5f}")
         logger.info(f"BTC balance: {btc_balance:.5f}")
+        client.ai_analysis()
 
-        # Get and analyze market data
-        analysis_24h, analysis_30d, analysis_90d = client.get_analysis("BTC-USD")
+
 
     except Exception as e:
         logger.error(f"An error occurred: {str(e)}")
