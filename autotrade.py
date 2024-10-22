@@ -13,7 +13,9 @@ from cryptography.hazmat.primitives import serialization
 from typing import Tuple, Optional, Dict, Any
 from urllib.parse import quote
 import requests
-
+import uuid
+import robin_stocks as r
+from json import dumps
 import yfinance as yf
 import fear_and_greed
 from openai import OpenAI
@@ -23,6 +25,8 @@ from ta.trend import SMAIndicator, MACD
 from ta.momentum import RSIIndicator
 from ta.volatility import BollingerBands
 from ta.utils import dropna
+from typing import Tuple
+from coinbase.rest import RESTClient
 
 # Configure pandas display options for better readability
 pd.set_option('display.max_columns', None)
@@ -57,6 +61,62 @@ class TradingDecision(BaseModel):
     reason: str
 
 
+class FeeCalculator:
+    """Calculate Coinbase fees based on transaction amount and payment method"""
+
+    MINIMUM_ORDER_SIZE = 10.00  # Minimum order size in USD
+
+    @staticmethod
+    def calculate_flat_fee(amount: float) -> float:
+        """Calculate flat fee based on transaction amount"""
+        if amount < FeeCalculator.MINIMUM_ORDER_SIZE:
+            return 0  # Don't calculate fees for orders below minimum
+        elif amount <= 10:
+            return 0.99
+        elif amount <= 25:
+            return 1.49
+        elif amount <= 50:
+            return 1.99
+        elif amount <= 200:
+            return 2.99
+        return 0  # For amounts > $200, percentage-based fee applies instead
+
+    @staticmethod
+    def calculate_fees(amount: float, payment_method: str = "USD_WALLET") -> Tuple[float, float]:
+        """
+        Calculate total fees for a transaction
+        Returns (spread_fee, transaction_fee)
+        """
+        # Don't calculate fees for orders below minimum
+        if amount < FeeCalculator.MINIMUM_ORDER_SIZE:
+            return 0.0, 0.0
+
+        # Round amount to 2 decimal places
+        amount = round(amount, 2)
+
+        # Spread fee (0.50%)
+        spread_fee = round(amount * 0.005, 2)
+
+        # Transaction fee based on payment method
+        if amount > 200:
+            # Percentage-based fee for amounts over $200
+            if payment_method == "ACH":
+                transaction_fee = 0
+            elif payment_method == "USD_WALLET":
+                transaction_fee = round(amount * 0.0149, 2)  # 1.49%
+            elif payment_method == "CARD":
+                transaction_fee = round(amount * 0.0399, 2)  # 3.99%
+            elif payment_method == "WIRE":
+                transaction_fee = 10  # Incoming wire fee ($10)
+            else:
+                transaction_fee = round(amount * 0.0149, 2)  # Default to USD Wallet fee
+        else:
+            # Flat fee for amounts <= $200
+            transaction_fee = FeeCalculator.calculate_flat_fee(amount)
+
+        return spread_fee, transaction_fee
+
+
 class Autotrade:
     """
     A class for automated cryptocurrency trading using Coinbase API.
@@ -65,7 +125,7 @@ class Autotrade:
 
     def __init__(self):
         # Initialize Autotrade with API credentials and connection settings
-        self.api_key, self.api_secret = self._get_api_credentials()
+        self.api_key, self.api_secret, self.rest_client = self._get_api_credentials()
         self.base_url = "api.coinbase.com"
         self.exchange_url = "api.exchange.coinbase.com"
         self.openai_client = OpenAI(api_key=Config.OPENAI_API_KEY)
@@ -83,19 +143,30 @@ class Autotrade:
         load_dotenv()
         api_key = os.getenv("api_key")
         api_secret = os.getenv("api_secret")
+
+        rest_client = RESTClient(api_key=api_key, api_secret=api_secret)
         if not api_key or not api_secret:
             raise ValueError("API credentials not found in environment variables")
-        return api_key, api_secret
+        return api_key, api_secret, rest_client
 
     # Build JWT token for API authentication.
-    def _build_jwt(self, resource: str) -> str:
+    def _build_jwt(self, method: str, resource: str) -> str:
+        """
+        Build JWT token for API authentication with correct method and resource path
+
+        Args:
+            method: HTTP method (GET, POST, etc.)
+            resource: API resource path
+        """
         private_key_bytes = self.api_secret.encode('utf-8')
         private_key = serialization.load_pem_private_key(private_key_bytes, password=None)
-        uri = f"GET api.coinbase.com/api/v3/brokerage/{resource}"
+
+        # Construct the full URI path correctly
+        uri = f"{method} api.coinbase.com{resource}"
 
         jwt_payload = {
             'sub': self.api_key,
-            'iss': "cdp",
+            'iss': "coinbase-cloud",
             'nbf': int(time.time()),
             'exp': int(time.time()) + 120,
             'uri': uri,
@@ -109,7 +180,7 @@ class Autotrade:
         )
 
     # Get or create an HTTP connection with appropriate headers.
-    def _get_connection(self, resource: str, base_url: str) -> Tuple[dict, http.client.HTTPSConnection]:
+    def _get_connection(self, method: str, resource: str, base_url: str) -> Tuple[dict, http.client.HTTPSConnection]:
         current_time = time.time()
 
         # Check if we need to refresh headers
@@ -120,7 +191,7 @@ class Autotrade:
             if self._cached_conn:
                 self._cached_conn.close()
 
-            jwt_token = self._build_jwt(resource)
+            jwt_token = self._build_jwt(method, resource)
             self._cached_conn = http.client.HTTPSConnection(base_url)
             self._cached_headers = {
                 'Content-Type': 'application/json',
@@ -214,11 +285,12 @@ class Autotrade:
     # Get available balances for USD and BTC.
     @lru_cache(maxsize=32)
     def get_available_balance(self) -> Tuple[float, float]:
-        resource = "accounts"
-        headers, conn = self._get_connection(resource, self.base_url)
+        """Get available balances for USD and BTC."""
+        resource = "/api/v3/brokerage/accounts"
+        headers, conn = self._get_connection("GET", resource, self.base_url)
 
         try:
-            conn.request("GET", "/api/v3/brokerage/accounts", '', headers)
+            conn.request("GET", resource, '', headers)
             res = conn.getresponse()
             self._check_response(res)
             data = json.loads(res.read().decode("utf-8"))
@@ -341,37 +413,9 @@ class Autotrade:
     def get_news(self):
         # Fetch news from multiple sources
         return {
-            "google_news": self._get_news_from_google(),
             "alpha_vantage_news": self._get_news_from_alpha_vantage(),
             "robinhood_news": self._get_news_from_robinhood()
         }
-
-    def _get_news_from_google(self):
-        # Fetch news from Google
-        self.logger.info("Fetching news from Google")
-        url = "https://www.searchapi.io/api/v1/search"
-        params = {
-            "api_key": Config.SERPAPI_API_KEY,
-            "engine": "google_news",
-            "q": "BTC",
-            "num": 5
-        }
-        headers = {"Accept": "application/json"}
-        try:
-            response = requests.get(url, params=params, headers=headers)
-            response.raise_for_status()
-            data = response.json()
-            news_items = []
-            for result in data.get('organic_results', [])[:5]:
-                news_items.append({
-                    'title': result['title'],
-                    'date': result['date']
-                })
-            self.logger.info(f"Retrieved {len(news_items)} news items from Google")
-            return news_items
-        except Exception as e:
-            self.logger.error(f"Error during Google News API request: {e}")
-            return []
 
     def _get_news_from_robinhood(self):
         self.logger.info("Fetching news from Robinhood")
@@ -416,6 +460,160 @@ class Autotrade:
         except Exception as e:
             self.logger.error(f"Error during Alpha Vantage API request: {e}")
             return []
+
+    # Execute trade based on AI decision
+    def execute_trade(self, decision: TradingDecision) -> bool:
+        try:
+            if decision.decision.upper() == "BUY":
+                return self._execute_buy_order(decision.percentage)
+            elif decision.decision.upper() == "SELL":
+                return self._execute_sell_order(decision.percentage)
+            return True  # HOLD case
+        except Exception as e:
+            self.logger.error(f"Trade execution failed: {str(e)}")
+            return False
+
+    # Execute buy order with Coinbase fee structure
+    def _execute_buy_order(self, percentage: int) -> bool:
+        """Execute buy order with Coinbase fee structure and proper USD precision"""
+        try:
+            # Get current balances
+            usd_balance, _ = self.get_available_balance()
+
+            # Calculate order amount based on percentage
+            base_amount = usd_balance * (percentage / 100)
+
+            # Calculate fees
+            spread_fee, transaction_fee = FeeCalculator.calculate_fees(base_amount, "USD_WALLET")
+            total_fees = spread_fee + transaction_fee
+
+            # Calculate final amount after fees
+            available_funds = base_amount - total_fees
+
+            # Round to 2 decimal places for USD
+            available_funds = round(available_funds, 2)
+
+            # Minimum order size check (Coinbase minimum is typically around $10)
+            MINIMUM_ORDER_SIZE = 1.00
+            if available_funds < MINIMUM_ORDER_SIZE:
+                self.logger.warning(
+                    f"Order amount ${available_funds:.2f} is below minimum order size ${MINIMUM_ORDER_SIZE}")
+                return False
+
+            if available_funds <= 0:
+                self.logger.warning(f"Insufficient USD balance after fees. "
+                                    f"Balance: ${base_amount:.2f}, "
+                                    f"Fees: ${total_fees:.2f} "
+                                    f"(Spread: ${spread_fee:.2f}, Transaction: ${transaction_fee:.2f})")
+                return False
+
+            # Pre-order logging
+            self.logger.info(f"Attempting to place buy order:")
+            self.logger.info(f"Original amount: ${base_amount:.2f}")
+            self.logger.info(f"Fees: ${total_fees:.2f}")
+            self.logger.info(f"Final order amount: ${available_funds:.2f}")
+
+            # Create market buy order
+            client_order_id = str(uuid.uuid4().hex)
+            product_id = "BTC-USD"
+
+            # Convert to string with proper precision
+            quote_size = f"{available_funds:.2f}"
+
+            self.logger.info(f"Placing order with quote_size: {quote_size}")
+
+            order_data = self.rest_client.market_order_buy(
+                client_order_id=client_order_id,
+                product_id=product_id,
+                quote_size=quote_size
+            )
+
+            order_data = dumps(order_data, indent=2)
+            self.logger.info(f"Buy order executed successfully: {order_data}")
+            self.logger.info(f"Order amount: ${available_funds:.2f}")
+            self.logger.info(f"Total fees: ${total_fees:.2f} "
+                             f"(Spread: ${spread_fee:.2f}, Transaction: ${transaction_fee:.2f})")
+
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Error executing buy order: {str(e)}")
+            return False
+
+    # Execute sell order with Coinbase fee structure
+    def _execute_sell_order(self, percentage: int) -> bool:
+        """Execute sell order with Coinbase fee structure and proper BTC precision"""
+        try:
+            # Get current balances
+            _, btc_balance = self.get_available_balance()
+
+            # Calculate amount to sell based on percentage
+            btc_amount = btc_balance * (percentage / 100)
+
+            if btc_amount <= 0:
+                self.logger.warning("Insufficient BTC balance for sell order")
+                return False
+
+            # Round BTC amount to 8 decimal places (Coinbase standard)
+            btc_amount = round(btc_amount, 8)
+
+            if btc_amount < 0.00001:  # Minimum trade amount check
+                self.logger.warning(f"BTC amount {btc_amount} is below minimum tradeable amount")
+                return False
+
+            # Get current BTC price using recent candle data
+            end_time = datetime.utcnow()
+            start_time = end_time - timedelta(minutes=5)
+            start_str = start_time.isoformat().split('+')[0] + 'Z'
+            end_str = end_time.isoformat().split('+')[0] + 'Z'
+
+            price_data = self.get_candles(
+                product_id="BTC-USD",
+                granularity=60,
+                start=quote(start_str),
+                end=quote(end_str)
+            )
+
+            if price_data is None or price_data.empty:
+                self.logger.error("Unable to get current BTC price")
+                return False
+
+            current_price = float(price_data['close'].iloc[-1])
+            estimated_usd_value = btc_amount * current_price
+
+            # Calculate fees
+            spread_fee, transaction_fee = FeeCalculator.calculate_fees(estimated_usd_value, "USD_WALLET")
+            total_fees = spread_fee + transaction_fee
+
+            # Create market sell order with correct authentication
+            client_order_id = str(uuid.uuid4().hex)
+            product_id = "BTC-USD"
+
+            # Convert to string with proper precision
+            base_size = f"{btc_amount:.8f}"
+
+            # Log pre-order details
+            self.logger.info(f"Attempting to sell {base_size} BTC")
+            self.logger.info(f"Estimated USD value: ${estimated_usd_value:.2f}")
+
+            order_data = self.rest_client.market_order_sell(
+                client_order_id=client_order_id,
+                product_id=product_id,
+                base_size=base_size
+            )
+
+            order_data = dumps(order_data, indent=2)
+            self.logger.info(f"Sell order executed successfully: {order_data}")
+            self.logger.info(f"Amount sold: {base_size} BTC")
+            self.logger.info(f"Estimated total fees: ${total_fees:.2f} "
+                             f"(Spread: ${spread_fee:.2f}, Transaction: ${transaction_fee:.2f})")
+
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Error executing sell order: {str(e)}")
+            return False
+
 
     # Perform AI-based analysis
     def ai_analysis(self):
@@ -490,6 +688,8 @@ class Autotrade:
         self.logger.info(f"### Percentage: {result.percentage} ###")
         self.logger.info(f"### Reason: {result.reason} ###")
         self.logger.info(f"### VIX INDEX: {vix_index} ###")
+
+        self.execute_trade(result)
 
 
 def main():

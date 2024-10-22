@@ -6,3 +6,4 @@ fear_and_greed
 OpenAI
 pydantic
 requests
+robin_stocks
