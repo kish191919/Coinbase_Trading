@@ -29,6 +29,13 @@ from ta.utils import dropna
 from typing import Tuple
 from coinbase.rest import RESTClient
 
+import sqlite3
+from datetime import datetime
+from typing import Optional, Dict, Any
+
+from typing import List, Dict, Tuple, Optional, Any
+import traceback
+
 # Configure pandas display options for better readability
 pd.set_option('display.max_columns', None)
 pd.set_option('display.width', None)
@@ -55,12 +62,10 @@ class Config:
     SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-
 class TradingDecision(BaseModel):
     decision: str
     percentage: int
     reason: str
-
 
 class FeeCalculator:
     """Calculate Coinbase fees based on transaction amount and payment method"""
@@ -118,19 +123,184 @@ class FeeCalculator:
         return spread_fee, transaction_fee
 
 
-class Autotrade:
+class DatabaseManager:
+    def __init__(self):
+        """Initialize DatabaseManager with logging and database connection"""
+        self.db_name = "bitcoin_trades.db"
+        self.conn = None
+        self.cursor = None
+
+        # Initialize logger first
+        self.logger = logging.getLogger("DatabaseManager")
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
+            )
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+            self.logger.setLevel(logging.INFO)
+
+        # Setup database after logger is initialized
+        self.setup_database()
+
+    def setup_database(self):
+        """Setup database connection and create tables if they don't exist"""
+        try:
+            self.conn = sqlite3.connect(self.db_name)
+            self.cursor = self.conn.cursor()
+
+            # Create trades table
+            self.cursor.execute('''
+                CREATE TABLE IF NOT EXISTS trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    decision TEXT NOT NULL,
+                    percentage INTEGER NOT NULL,
+                    reason TEXT,
+                    btc_balance REAL,
+                    usd_balance REAL,
+                    current_btc_price REAL,
+                    average_buy_price REAL,
+                    profit_loss REAL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            self.conn.commit()
+
+            self.logger.info(f"Database setup complete: {self.db_name}")
+
+        except Exception as e:
+            if hasattr(self, 'logger'):
+                self.logger.error(f"Database setup error: {str(e)}")
+                self.logger.error(traceback.format_exc())
+            else:
+                print(f"Database setup error: {str(e)}")
+                print(traceback.format_exc())
+            raise
+
+    def save_trade(self, trade_data: dict):
+        """Save trade data to database"""
+        try:
+            # Ensure all required fields are present with default values
+            trade_data = {
+                'timestamp': trade_data.get('timestamp', datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')),
+                'decision': trade_data.get('decision', 'UNKNOWN'),
+                'percentage': trade_data.get('percentage', 0),
+                'reason': trade_data.get('reason', ''),
+                'btc_balance': trade_data.get('btc_balance', 0.0),
+                'usd_balance': trade_data.get('usd_balance', 0.0),
+                'current_btc_price': trade_data.get('current_btc_price', 0.0),
+                'average_buy_price': trade_data.get('average_buy_price', 0.0),
+                'profit_loss': trade_data.get('profit_loss', 0.0)
+            }
+
+            query = '''
+                INSERT INTO trades (
+                    timestamp, decision, percentage, reason,
+                    btc_balance, usd_balance, current_btc_price,
+                    average_buy_price, profit_loss
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            '''
+
+            self.cursor.execute(query, (
+                trade_data['timestamp'],
+                trade_data['decision'],
+                trade_data['percentage'],
+                trade_data['reason'],
+                trade_data['btc_balance'],
+                trade_data['usd_balance'],
+                trade_data['current_btc_price'],
+                trade_data['average_buy_price'],
+                trade_data['profit_loss']
+            ))
+            self.conn.commit()
+            self.logger.info("Trade data saved successfully")
+
+        except Exception as e:
+            self.logger.error(f"Error saving trade data: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            if self.conn:
+                self.conn.rollback()
+            raise
+
+    def get_trades(self, limit: int = None, start_date: str = None, end_date: str = None):
+        """
+        Retrieve trade records with optional filtering
+        """
+        try:
+            query = "SELECT * FROM trades"
+            params = []
+
+            # Add date filters if provided
+            if start_date or end_date:
+                conditions = []
+                if start_date:
+                    conditions.append("timestamp >= ?")
+                    params.append(f"{start_date} 00:00:00")
+                if end_date:
+                    conditions.append("timestamp <= ?")
+                    params.append(f"{end_date} 23:59:59")
+                if conditions:
+                    query += " WHERE " + " AND ".join(conditions)
+
+            # Add ordering
+            query += " ORDER BY timestamp DESC"
+
+            # Add limit if provided
+            if limit:
+                query += f" LIMIT {limit}"
+
+            if params:
+                self.cursor.execute(query, params)
+            else:
+                self.cursor.execute(query)
+
+            columns = [description[0] for description in self.cursor.description]
+            trades = []
+
+            for row in self.cursor.fetchall():
+                trade_dict = dict(zip(columns, row))
+                trades.append(trade_dict)
+
+            return trades
+
+        except Exception as e:
+            self.logger.error(f"Error fetching trades: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return []
+
+    def __del__(self):
+        """Clean up database connection on object destruction"""
+        try:
+            if hasattr(self, 'conn') and self.conn:
+                self.conn.close()
+                if hasattr(self, 'logger'):
+                    self.logger.info("Database connection closed")
+        except Exception as e:
+            if hasattr(self, 'logger'):
+                self.logger.error(f"Error closing database connection: {str(e)}")
+            else:
+                print(f"Error closing database connection: {str(e)}")
+
+
+class CoinbaseAutoTrading:
     """
     A class for automated cryptocurrency trading using Coinbase API.
     Handles authentication, data retrieval, and technical analysis.
     """
 
     def __init__(self):
-        # Initialize Autotrade with API credentials and connection settings
+        # Initialize CoinbaseAutoTrading with API credentials and connection settings
         self.api_key, self.api_secret, self.rest_client = self._get_api_credentials()
         self.base_url = "api.coinbase.com"
         self.exchange_url = "api.exchange.coinbase.com"
         self.openai_client = OpenAI(api_key=Config.OPENAI_API_KEY)
-        self.logger = logging.getLogger(f"Autotrade")
+        self.logger = logging.getLogger(f"CoinbaseAutoTrading")
+        self.current_btc_price = 0
+
+        self.db_manager = DatabaseManager()
+        self.logger = logging.getLogger(f"CoinbaseAutoTrading")
 
         # Store connection and headers for reuse
         self._cached_conn: Optional[http.client.HTTPSConnection] = None
@@ -197,7 +367,7 @@ class Autotrade:
             self._cached_headers = {
                 'Content-Type': 'application/json',
                 'Authorization': f'Bearer {jwt_token}',
-                'User-Agent': 'AutoTrade/1.0'
+                'User-Agent': 'CoinbaseAutoTrading/1.0'
             }
             self._headers_timestamp = current_time
 
@@ -262,7 +432,7 @@ class Autotrade:
             # Set headers with proper user agent
             headers = {
                 'Content-Type': 'application/json',
-                'User-Agent': 'AutoTrade/1.0'
+                'User-Agent': 'CoinbaseAutoTrading/1.0'
             }
 
             logger.debug(f"Requesting candle data: {query}")
@@ -350,7 +520,7 @@ class Autotrade:
 
     # Get historical price data for different time periods.
     def get_historical_data(self, product_id: str = "BTC-USD") -> Tuple[
-        Optional[pd.DataFrame], Optional[pd.DataFrame], Optional[pd.DataFrame]]:
+        Optional[pd.DataFrame], Optional[pd.DataFrame]]:
         end_time = datetime.utcnow()
         periods = {
             '24h': {'days': 1, 'granularity': 900},  # 15-minute intervals
@@ -371,10 +541,12 @@ class Autotrade:
             )
             results.append(df)
 
+        self.current_btc_price = results[1]["close"][-1]
+
         return tuple(results)
 
     # Get technical analysis for different time periods.
-    def get_analysis(self, product_id: str = "BTC-USD") -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    def get_analysis(self, product_id: str = "BTC-USD") -> Tuple[pd.DataFrame, pd.DataFrame]:
 
         data_24h, data_30d = self.get_historical_data(product_id)
 
@@ -475,8 +647,6 @@ class Autotrade:
         except Exception as e:
             self.logger.error(f"Error fetching YouTube transcript: {str(e)}")
             return f"An error occurred: {str(e)}"
-
-
 
     # Execute trade based on AI decision
     def execute_trade(self, decision: TradingDecision) -> bool:
@@ -715,20 +885,301 @@ class Autotrade:
         self.logger.info(f"### Reason: {result.reason} ###")
         self.logger.info(f"### VIX INDEX: {vix_index} ###")
 
+        # Execute trade
         self.execute_trade(result)
 
+        # Get trading data
+        trading_stats = self.get_trading_data()
+
+        # Calculate profit if trading_stats is available
+        if trading_stats is not None:
+            self.calculate_trading_profit(trading_stats)
+
+        # Save to database
+        self.save_trading_decision(result, trading_stats)
+
+    def save_trading_decision(self, decision: TradingDecision, trading_stats: dict):
+        """거래 결정 및 결과를 데이터베이스에 저장"""
+        try:
+            # 현재 잔고 조회
+            usd_balance, btc_balance = self.get_available_balance()
+
+            # 저장할 데이터 구성
+            trade_data = {
+                'timestamp': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
+                'decision': decision.decision,
+                'percentage': decision.percentage,
+                'reason': decision.reason,
+                'btc_balance': btc_balance,
+                'usd_balance': usd_balance,
+                'current_btc_price': self.current_btc_price,
+                'average_buy_price': trading_stats.get('average_buy_price', 0),
+                'profit_loss': trading_stats.get('profit_loss', 0)
+            }
+
+            # 데이터베이스에 저장
+            self.db_manager.save_trade(trade_data)
+            self.logger.info("Trade data saved to database successfully")
+
+        except Exception as e:
+            self.logger.error(f"Error saving trade data to database: {str(e)}")
+            raise
+
+    def get_trading_data(self):
+        """
+        Calculate BTC trading statistics from historical fills.
+        """
+        try:
+            # Get fills using the REST client
+            fills_response = self.rest_client.get_fills(
+                product_id='BTC-USD'
+            )
+
+            # Initialize default trading stats
+            default_trading_stats = {
+                'net_btc_position': 0.0,
+                'average_buy_price': 0.0,
+                'average_sell_price': 0.0,
+                'total_commission': 0.0,
+                'cost_basis': 0.0,
+                'current_value': 0.0,
+                'roi_percentage': 0.0,
+                'current_price': self.current_btc_price or 0.0,
+                'trade_summary': {
+                    'total_buy_btc': 0.0,
+                    'total_buy_cost': 0.0,
+                    'total_sell_btc': 0.0,
+                    'total_sell_proceeds': 0.0,
+                    'completed_buys': [],
+                    'completed_sells': []
+                },
+                'profit_loss': 0.0
+            }
+
+            # Debug logging and response handling
+            self.logger.debug(f"Raw fills response type: {type(fills_response)}")
+            if isinstance(fills_response, dict):
+                fills = fills_response.get('fills', [])
+                self.logger.debug(f"Found {len(fills)} fills in response")
+            elif isinstance(fills_response, str):
+                try:
+                    response_dict = json.loads(fills_response)
+                    fills = response_dict.get('fills', [])
+                except json.JSONDecodeError as e:
+                    self.logger.error(f"Failed to parse JSON: {e}")
+                    return default_trading_stats
+            else:
+                self.logger.error(f"Unexpected response type: {type(fills_response)}")
+                return default_trading_stats
+
+            if not fills:
+                self.logger.warning("No fills data available")
+                return default_trading_stats
+
+            # Initialize tracking variables
+            total_buy_btc = 0.0
+            total_buy_cost = 0.0
+            total_sell_btc = 0.0
+            total_sell_proceeds = 0.0
+            total_commission = 0.0
+            completed_buys = []  # Track completed buy trades
+            completed_sells = []  # Track completed sell trades
+
+            for fill in fills:
+                try:
+                    price = float(fill.get('price', 0))
+                    commission = float(fill.get('commission', 0))
+                    is_buy = fill.get('side') == 'BUY'
+                    size_in_quote = fill.get('size_in_quote', False)
+                    size = float(fill.get('size', 0))
+
+                    # Convert size to BTC amount if size_in_quote is True
+                    btc_amount = size / price if size_in_quote else size
+                    usd_amount = size if size_in_quote else size * price
+
+                    # Track commission
+                    total_commission += commission
+
+                    if is_buy:
+                        total_buy_btc += btc_amount
+                        total_buy_cost += usd_amount
+                        # Store completed buy trades
+                        completed_buys.append({
+                            'btc_amount': btc_amount,
+                            'usd_amount': usd_amount,
+                            'price': price,
+                            'timestamp': fill.get('timestamp', 'N/A')
+                        })
+                    else:
+                        total_sell_btc += btc_amount
+                        total_sell_proceeds += usd_amount
+                        # Store completed sell trades
+                        completed_sells.append({
+                            'btc_amount': btc_amount,
+                            'usd_amount': usd_amount,
+                            'price': price,
+                            'timestamp': fill.get('timestamp', 'N/A')
+                        })
+                except (ValueError, TypeError) as e:
+                    self.logger.error(f"Error processing fill: {str(e)}")
+                    continue
+
+            # Calculate average buy price from completed buys
+            if completed_buys:
+                weighted_buy_sum = sum(buy['usd_amount'] for buy in completed_buys)
+                total_bought_btc = sum(buy['btc_amount'] for buy in completed_buys)
+                average_buy_price = weighted_buy_sum / total_bought_btc if total_bought_btc > 0 else 0
+            else:
+                average_buy_price = 0
+
+            # Calculate average sell price from completed sells
+            if completed_sells:
+                weighted_sell_sum = sum(sell['usd_amount'] for sell in completed_sells)
+                total_sold_btc = sum(sell['btc_amount'] for sell in completed_sells)
+                average_sell_price = weighted_sell_sum / total_sold_btc if total_sold_btc > 0 else 0
+            else:
+                average_sell_price = 0
+
+            # Calculate net BTC position (considering commission)
+            net_btc_position = total_buy_btc - total_sell_btc - total_commission
+
+            # Calculate current value and ROI
+            if self.current_btc_price and net_btc_position > 0:
+                current_value = net_btc_position * self.current_btc_price
+                cost_basis = total_buy_cost - total_sell_proceeds
+                roi = ((current_value - cost_basis) / cost_basis * 100) if cost_basis > 0 else 0
+            else:
+                current_value = net_btc_position * (price if 'price' in locals() else 0)
+                cost_basis = total_buy_cost - total_sell_proceeds
+                roi = 0
+
+            # Calculate profit/loss
+            profit_loss = total_sell_proceeds - (total_buy_cost + total_commission)
+
+            trading_stats = {
+                'net_btc_position': net_btc_position,
+                'average_buy_price': average_buy_price,
+                'average_sell_price': average_sell_price,
+                'total_commission': total_commission,
+                'cost_basis': cost_basis,
+                'current_value': current_value,
+                'roi_percentage': roi,
+                'current_price': self.current_btc_price,
+                'profit_loss': profit_loss,
+                'trade_summary': {
+                    'total_buy_btc': total_buy_btc,
+                    'total_buy_cost': total_buy_cost,
+                    'total_sell_btc': total_sell_btc,
+                    'total_sell_proceeds': total_sell_proceeds,
+                    'completed_buys': completed_buys,
+                    'completed_sells': completed_sells
+                }
+            }
+
+            self.logger.info(f"Trading stats calculated successfully")
+            self.logger.debug(f"Trading stats: {trading_stats}")
+            return trading_stats
+
+        except Exception as e:
+            self.logger.error(f"Error in get_trading_data: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            raise
+
+    def calculate_trading_profit(self, trading_stats):
+        """
+        Calculate trading profits and returns from trading statistics including weighted average prices
+        """
+        try:
+            if trading_stats is None:
+                self.logger.warning("No trading stats available for profit calculation")
+                return None
+
+            # Extract required values with safe gets
+            trade_summary = trading_stats.get('trade_summary', {})
+            total_buy_cost = trade_summary.get('total_buy_cost', 0.0)
+            total_sell_proceeds = trade_summary.get('total_sell_proceeds', 0.0)
+            total_commission = trading_stats.get('total_commission', 0.0)
+            completed_buys = trade_summary.get('completed_buys', [])
+            completed_sells = trade_summary.get('completed_sells', [])
+
+            # Calculate total costs (buy cost + commission)
+            total_costs = total_buy_cost + total_commission
+
+            # Calculate profit/loss
+            profit_loss = total_sell_proceeds - total_costs
+
+            # Calculate return percentage
+            return_percentage = (profit_loss / total_costs * 100) if total_costs > 0 else 0
+
+            # Get average prices
+            average_buy_price = trading_stats.get('average_buy_price', 0.0)
+            average_sell_price = trading_stats.get('average_sell_price', 0.0)
+
+            # Calculate total traded BTC
+            total_bought_btc = sum(buy.get('btc_amount', 0.0) for buy in completed_buys)
+            total_sold_btc = sum(sell.get('btc_amount', 0.0) for sell in completed_sells)
+
+            # Create results dictionary
+            results = {
+                'total_buy_cost': total_buy_cost,
+                'total_sell_proceeds': total_sell_proceeds,
+                'total_commission': total_commission,
+                'total_costs': total_costs,
+                'profit_loss': profit_loss,
+                'return_percentage': return_percentage,
+                'average_buy_price': average_buy_price,
+                'average_sell_price': average_sell_price,
+                'total_btc_bought': total_bought_btc,
+                'total_btc_sold': total_sold_btc
+            }
+
+            # Print detailed results
+            print("\n=== Trading Profit Analysis ===")
+            print(f"Total Buy Cost: ${total_buy_cost:,.2f}")
+            print(f"Total Sell Proceeds: ${total_sell_proceeds:,.2f}")
+            print(f"Total Commission: ${total_commission:,.2f}")
+            print(f"Total Costs (Buy + Commission): ${total_costs:,.2f}")
+            print(f"Average Buy Price: ${average_buy_price:,.2f}")
+            print(f"Average Sell Price: ${average_sell_price:,.2f}")
+            print(f"Total BTC Bought: {total_bought_btc:.8f} BTC")
+            print(f"Total BTC Sold: {total_sold_btc:.8f} BTC")
+            print(f"Profit/Loss: ${profit_loss:,.2f}")
+            print(f"Return: {return_percentage:.2f}%")
+
+            # Print individual buy trades
+            if completed_buys:
+                print("\nCompleted Buy Trades:")
+                for i, buy in enumerate(completed_buys, 1):
+                    print(f"Buy {i}: {buy.get('btc_amount', 0):.8f} BTC @ ${buy.get('price', 0):,.2f}")
+
+            # Print individual sell trades
+            if completed_sells:
+                print("\nCompleted Sell Trades:")
+                for i, sell in enumerate(completed_sells, 1):
+                    print(f"Sell {i}: {sell.get('btc_amount', 0):.8f} BTC @ ${sell.get('price', 0):,.2f}")
+
+            print("===========================\n")
+
+            return results
+
+        except Exception as e:
+            self.logger.error(f"Error calculating trading profit: {str(e)}")
+            self.logger.error(traceback.format_exc())
+            return None
 
 def main():
-    """Main function to demonstrate the usage of Autotrade."""
+    """Main function to demonstrate the usage of CoinbaseAutoTrading."""
     try:
-        client = Autotrade()
-
+        client = CoinbaseAutoTrading()
         # Get and log balances
         usd_balance, btc_balance = client.get_available_balance()
         logger.info(f"USD balance: {usd_balance:.5f}")
         logger.info(f"BTC balance: {btc_balance:.5f}")
-        client.ai_analysis()
 
+        client.ai_analysis()
+        usd_balance, btc_balance = client.get_available_balance()
+        logger.info(f"USD balance: {usd_balance:.5f}")
+        logger.info(f"BTC balance: {btc_balance:.5f}")
 
 
     except Exception as e:

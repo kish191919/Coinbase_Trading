@@ -5,8 +5,10 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="ad23cfdd-1441-4172-85f5-8b80271e8169" name="Changes" comment="">
+      <change afterPath="$PROJECT_DIR$/test2.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/autotrade.py" beforeDir="false" afterPath="$PROJECT_DIR$/autotrade.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/test.py" beforeDir="false" afterPath="$PROJECT_DIR$/test.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -54,6 +56,7 @@
     "Python.coinbase_AI_trading.executor": "Run",
     "Python.main.executor": "Run",
     "Python.test.executor": "Run",
+    "Python.test2.executor": "Run",
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "git-widget-placeholder": "master",
     "last_opened_file_path": "/Users/sunghwanki/Desktop/Coinbase_Trading"
