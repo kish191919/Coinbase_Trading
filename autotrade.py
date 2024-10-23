@@ -20,6 +20,7 @@ import yfinance as yf
 import fear_and_greed
 from openai import OpenAI
 from pydantic import BaseModel
+from youtube_transcript_api import YouTubeTranscriptApi
 
 from ta.trend import SMAIndicator, MACD
 from ta.momentum import RSIIndicator
@@ -64,7 +65,7 @@ class TradingDecision(BaseModel):
 class FeeCalculator:
     """Calculate Coinbase fees based on transaction amount and payment method"""
 
-    MINIMUM_ORDER_SIZE = 10.00  # Minimum order size in USD
+    MINIMUM_ORDER_SIZE = 1.00  # Minimum order size in USD
 
     @staticmethod
     def calculate_flat_fee(amount: float) -> float:
@@ -202,6 +203,43 @@ class Autotrade:
 
         return self._cached_headers, self._cached_conn
 
+    # Get available balances for USD and BTC.
+    @lru_cache(maxsize=32)
+    def get_available_balance(self) -> Tuple[float, float]:
+        """Get available balances for USD and BTC."""
+        resource = "/api/v3/brokerage/accounts"
+        headers, conn = self._get_connection("GET", resource, self.base_url)
+
+        try:
+            conn.request("GET", resource, '', headers)
+            res = conn.getresponse()
+            self._check_response(res)
+            data = json.loads(res.read().decode("utf-8"))
+
+            balances = {
+                'USD': 0.0,
+                'BTC': 0.0
+            }
+
+            for account in data.get('accounts', []):
+                currency = account.get('currency', '')
+                if currency in balances and float(account.get('available_balance', {}).get('value', 0)) > 0:
+                    balances[currency] = float(account['available_balance']['value'])
+
+            return balances['USD'], balances['BTC']
+
+        except Exception as e:
+            logger.error(f"Error getting balances: {str(e)}")
+            raise
+
+    # Validate API response status code.
+    @staticmethod
+    def _check_response(response: http.client.HTTPResponse) -> None:
+        if response.status != 200:
+            error_msg = f"API request failed with status code: {response.status}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
     # Retrieve historical candle data for a specific product.
     def get_candles(self, product_id: str, granularity: int, start: Optional[str] = None, end: Optional[str] = None) -> \
             Optional[pd.DataFrame]:
@@ -274,43 +312,6 @@ class Autotrade:
         finally:
             conn.close()
 
-    # Validate API response status code.
-    @staticmethod
-    def _check_response(response: http.client.HTTPResponse) -> None:
-        if response.status != 200:
-            error_msg = f"API request failed with status code: {response.status}"
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-
-    # Get available balances for USD and BTC.
-    @lru_cache(maxsize=32)
-    def get_available_balance(self) -> Tuple[float, float]:
-        """Get available balances for USD and BTC."""
-        resource = "/api/v3/brokerage/accounts"
-        headers, conn = self._get_connection("GET", resource, self.base_url)
-
-        try:
-            conn.request("GET", resource, '', headers)
-            res = conn.getresponse()
-            self._check_response(res)
-            data = json.loads(res.read().decode("utf-8"))
-
-            balances = {
-                'USD': 0.0,
-                'BTC': 0.0
-            }
-
-            for account in data.get('accounts', []):
-                currency = account.get('currency', '')
-                if currency in balances and float(account.get('available_balance', {}).get('value', 0)) > 0:
-                    balances[currency] = float(account['available_balance']['value'])
-
-            return balances['USD'], balances['BTC']
-
-        except Exception as e:
-            logger.error(f"Error getting balances: {str(e)}")
-            raise
-
     # Add technical analysis indicators to the price data.
     @staticmethod
     def add_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -379,12 +380,12 @@ class Autotrade:
 
         return tuple(self.add_technical_indicators(df) if df is not None else None for df in [data_24h, data_30d])
 
+    # Cleanup method to properly close connections
     def __del__(self):
-        """Cleanup method to properly close connections."""
         if self._cached_conn:
             self._cached_conn.close()
 
-    # 2-4 Data Collection - VIX Index
+    # Data Collection - VIX Index
     def get_vix_index(self):
         # Fetch VIX INDEX data
         self.logger.info("Fetching VIX INDEX data")
@@ -398,7 +399,7 @@ class Autotrade:
             self.logger.error(f"Error fetching VIX INDEX: {str(e)}")
             return None
 
-    # 2-5 Data Collection - Fear & Greed Index
+    # Data Collection - Fear & Greed Index
     def get_fear_and_greed_index(self):
         # Fetch Fear and Greed Index
         self.logger.info("Fetching Fear and Greed Index")
@@ -461,6 +462,22 @@ class Autotrade:
             self.logger.error(f"Error during Alpha Vantage API request: {e}")
             return []
 
+    # Data Collection - Youtube
+    def get_youtube_transcript(self):
+        # Fetch YouTube video transcript
+        video_id = 'uagC-2UjAO0'
+        self.logger.info(f"Fetching YouTube transcript for video ID: {video_id}")
+        try:
+            transcript_data = YouTubeTranscriptApi.get_transcript(video_id)
+            full_transcript = " ".join(item['text'] for item in transcript_data)
+            self.logger.info(f"Retrieved transcript with {len(full_transcript)} characters")
+            return full_transcript.strip()
+        except Exception as e:
+            self.logger.error(f"Error fetching YouTube transcript: {str(e)}")
+            return f"An error occurred: {str(e)}"
+
+
+
     # Execute trade based on AI decision
     def execute_trade(self, decision: TradingDecision) -> bool:
         try:
@@ -493,11 +510,10 @@ class Autotrade:
             # Round to 2 decimal places for USD
             available_funds = round(available_funds, 2)
 
-            # Minimum order size check (Coinbase minimum is typically around $10)
-            MINIMUM_ORDER_SIZE = 1.00
-            if available_funds < MINIMUM_ORDER_SIZE:
+            # Minimum order size check
+            if available_funds < FeeCalculator.MINIMUM_ORDER_SIZE:
                 self.logger.warning(
-                    f"Order amount ${available_funds:.2f} is below minimum order size ${MINIMUM_ORDER_SIZE}")
+                    f"Order amount ${available_funds:.2f} is below minimum order size ${FeeCalculator.MINIMUM_ORDER_SIZE}")
                 return False
 
             if available_funds <= 0:
@@ -622,6 +638,12 @@ class Autotrade:
         news = self.get_news()
         fgi = self.get_fear_and_greed_index()
         vix_index = self.get_vix_index()
+        # youtube_transcript = self.get_youtube_transcript()
+        # f = open("strategy.txt","w",encoding="utf-8")
+        # f.write(youtube_transcript)
+        f = open("strategy.txt", "r")
+        youtube_transcript = f.read()
+        f.close()
 
         self.logger.info("Sending request to OpenAI")
         response = self.openai_client.chat.completions.create(
@@ -635,6 +657,10 @@ class Autotrade:
                         - The Fear and Greed Index and its implications
                         - VIX INDEX and its implications for market volatility
                         - Current VIX INDEX: {vix_index}
+                        
+                        Particularly important is to always refer to the trading method of 'TheMovingAverage', to assess the current situation and make trading decisions. TheMovingAverage's trading method is as follows:
+
+                        {youtube_transcript}
 
                         Based on this trading method, analyze the current market situation and make a judgment by synthesizing it with the provided data.
 
